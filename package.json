@@ -1,10 +1,7 @@
 {
   "name": "vercel-xhttp-relay",
-  "version": "2.1.0",
-  "description": "Stable Edge XHTTP relay proxy for Vercel",
+  "version": "1.0.0",
+  "description": "Edge XHTTP-compatible relay proxy",
   "private": true,
-  "license": "MIT",
-  "engines": {
-    "node": ">=18"
-  }
+  "license": "MIT"
 }
