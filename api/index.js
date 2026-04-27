@@ -1,32 +1,21 @@
 export const config = { runtime: "edge" };
 
 const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
-const CACHE = caches.default;
 
-const ALLOWED_HEADERS = new Set([
-  "accept",
-  "accept-language",
-  "content-type",
-  "user-agent",
-  "authorization",
-  "range",
+const STRIP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "forwarded",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
 ]);
-
-const ipMap = new Map();
-function rateLimit(ip) {
-  const now = Date.now();
-  const data = ipMap.get(ip);
-
-  if (!data || now - data.time > 1000) {
-    ipMap.set(ip, { count: 1, time: now });
-    return true;
-  }
-
-  if (data.count > 12) return false;
-
-  data.count++;
-  return true;
-}
 
 function buildTargetUrl(req) {
   const url = new URL(req.url);
@@ -35,44 +24,31 @@ function buildTargetUrl(req) {
 
 export default async function handler(req) {
   if (!TARGET_BASE) {
-    return new Response("Missing TARGET_DOMAIN", { status: 500 });
+    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
   }
 
-  const method = req.method;
-  const targetUrl = buildTargetUrl(req);
-
-  const cacheKey = new Request(targetUrl, { method: "GET" });
-
   try {
-    const ip =
-      req.headers.get("x-forwarded-for") ||
-      req.headers.get("x-real-ip") ||
-      "unknown";
+    const targetUrl = buildTargetUrl(req);
 
-    if (!rateLimit(ip)) {
-      return new Response("Too Many Requests", { status: 429 });
+    // بهتر: clone مستقیم headers (کمتر break)
+    const headers = new Headers(req.headers);
+
+    // پاکسازی minimal (نه aggressive)
+    for (const h of STRIP_HEADERS) {
+      headers.delete(h);
     }
 
-    if (method === "GET") {
-      const cached = await CACHE.match(cacheKey);
-      if (cached) return cached;
-    }
-
-    const headers = new Headers();
-
-    for (const [k, v] of req.headers) {
-      const key = k.toLowerCase();
-      if (ALLOWED_HEADERS.has(key)) {
-        headers.set(key, v);
-      }
-    }
-
+    // مهم برای سازگاری TLS / routing
     headers.set("x-forwarded-proto", "https");
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    // host واقعی upstream (کمک به سازگاری xhttp)
+    headers.set("host", new URL(TARGET_BASE).host);
 
+    const method = req.method;
     const hasBody = method !== "GET" && method !== "HEAD";
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 9000);
 
     const res = await fetch(targetUrl, {
       method,
@@ -84,21 +60,13 @@ export default async function handler(req) {
 
     clearTimeout(timeout);
 
+    // پاس-through کامل (برای XHTTP مهمه)
     const newRes = new Response(res.body, res);
-
-    if (method === "GET" && res.ok) {
-      newRes.headers.set(
-        "Cache-Control",
-        "public, s-maxage=60, stale-while-revalidate=300"
-      );
-
-      await CACHE.put(cacheKey, newRes.clone());
-    }
 
     return newRes;
 
   } catch (err) {
-    console.error("proxy error:", err);
+    console.error("relay error:", err);
     return new Response("Bad Gateway", { status: 502 });
   }
 }
