@@ -3,6 +3,7 @@ export const config = { runtime: "edge" };
 const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 
 const STRIP_HEADERS = new Set([
+  "host",
   "connection",
   "keep-alive",
   "proxy-authenticate",
@@ -17,56 +18,45 @@ const STRIP_HEADERS = new Set([
   "x-forwarded-port",
 ]);
 
-function buildTargetUrl(req) {
-  const url = new URL(req.url);
-  return TARGET_BASE + url.pathname + url.search;
-}
-
 export default async function handler(req) {
   if (!TARGET_BASE) {
     return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
   }
 
   try {
-    const targetUrl = buildTargetUrl(req);
+    const pathStart = req.url.indexOf("/", 8);
+    const targetUrl =
+      pathStart === -1 ? TARGET_BASE + "/" : TARGET_BASE + req.url.slice(pathStart);
 
-    // بهتر: clone مستقیم headers (کمتر break)
-    const headers = new Headers(req.headers);
-
-    // پاکسازی minimal (نه aggressive)
-    for (const h of STRIP_HEADERS) {
-      headers.delete(h);
+    const out = new Headers();
+    let clientIp = null;
+    for (const [k, v] of req.headers) {
+      if (STRIP_HEADERS.has(k)) continue;
+      if (k.startsWith("x-vercel-")) continue;
+      if (k === "x-real-ip") {
+        clientIp = v;
+        continue;
+      }
+      if (k === "x-forwarded-for") {
+        if (!clientIp) clientIp = v;
+        continue;
+      }
+      out.set(k, v);
     }
-
-    // مهم برای سازگاری TLS / routing
-    headers.set("x-forwarded-proto", "https");
-
-    // host واقعی upstream (کمک به سازگاری xhttp)
-    headers.set("host", new URL(TARGET_BASE).host);
+    if (clientIp) out.set("x-forwarded-for", clientIp);
 
     const method = req.method;
     const hasBody = method !== "GET" && method !== "HEAD";
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 9000);
-
-    const res = await fetch(targetUrl, {
+    return await fetch(targetUrl, {
       method,
-      headers,
+      headers: out,
       body: hasBody ? req.body : undefined,
+      duplex: "half",
       redirect: "manual",
-      signal: controller.signal,
     });
-
-    clearTimeout(timeout);
-
-    // پاس-through کامل (برای XHTTP مهمه)
-    const newRes = new Response(res.body, res);
-
-    return newRes;
-
   } catch (err) {
     console.error("relay error:", err);
-    return new Response("Bad Gateway", { status: 502 });
+    return new Response("Bad Gateway: Tunnel Failed", { status: 502 });
   }
 }
